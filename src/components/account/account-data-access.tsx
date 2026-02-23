@@ -13,11 +13,39 @@ import {
 } from '@solana/web3.js'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+function getBalanceQueryKey(connection: Connection, address: PublicKey) {
+  return ['get-balance', { endpoint: connection.rpcEndpoint, address }] as const
+}
+
+function getSignaturesQueryKey(connection: Connection, address: PublicKey) {
+  return ['get-signatures', { endpoint: connection.rpcEndpoint, address }] as const
+}
+
+function getTokenAccountsQueryKey(connection: Connection, address: PublicKey) {
+  return ['get-token-accounts', { endpoint: connection.rpcEndpoint, address }] as const
+}
+
+async function confirmSignature(connection: Connection, signature: TransactionSignature) {
+  const latestBlockhash = await connection.getLatestBlockhash()
+  await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed')
+}
+
+async function invalidateAccountQueries(client: ReturnType<typeof useQueryClient>, connection: Connection, address: PublicKey) {
+  await Promise.all([
+    client.invalidateQueries({
+      queryKey: getBalanceQueryKey(connection, address),
+    }),
+    client.invalidateQueries({
+      queryKey: getSignaturesQueryKey(connection, address),
+    }),
+  ])
+}
+
 export function useGetBalance({ address }: { address: PublicKey }) {
   const { connection } = useConnection()
 
   return useQuery({
-    queryKey: ['get-balance', { endpoint: connection.rpcEndpoint, address }],
+    queryKey: getBalanceQueryKey(connection, address),
     queryFn: () => connection.getBalance(address),
   })
 }
@@ -26,7 +54,7 @@ export function useGetSignatures({ address }: { address: PublicKey }) {
   const { connection } = useConnection()
 
   return useQuery({
-    queryKey: ['get-signatures', { endpoint: connection.rpcEndpoint, address }],
+    queryKey: getSignaturesQueryKey(connection, address),
     queryFn: () => connection.getSignaturesForAddress(address),
   })
 }
@@ -35,7 +63,7 @@ export function useGetTokenAccounts({ address }: { address: PublicKey }) {
   const { connection } = useConnection()
 
   return useQuery({
-    queryKey: ['get-token-accounts', { endpoint: connection.rpcEndpoint, address }],
+    queryKey: getTokenAccountsQueryKey(connection, address),
     queryFn: async () => {
       const [tokenAccounts, token2022Accounts] = await Promise.all([
         connection.getParsedTokenAccountsByOwner(address, {
@@ -61,7 +89,7 @@ export function useTransferSol({ address }: { address: PublicKey }) {
     mutationFn: async (input: { destination: PublicKey; amount: number }) => {
       let signature: TransactionSignature = ''
       try {
-        const { transaction, latestBlockhash } = await createTransaction({
+        const transaction = await createTransaction({
           publicKey: address,
           destination: input.destination,
           amount: input.amount,
@@ -72,7 +100,7 @@ export function useTransferSol({ address }: { address: PublicKey }) {
         signature = await wallet.sendTransaction(transaction, connection)
 
         // Send transaction and await for signature
-        await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed')
+        await confirmSignature(connection, signature)
 
         console.log(signature)
         return signature
@@ -88,14 +116,7 @@ export function useTransferSol({ address }: { address: PublicKey }) {
         // transactionToast(signature)
         console.log('Transaction sent', signature)
       }
-      await Promise.all([
-        client.invalidateQueries({
-          queryKey: ['get-balance', { endpoint: connection.rpcEndpoint, address }],
-        }),
-        client.invalidateQueries({
-          queryKey: ['get-signatures', { endpoint: connection.rpcEndpoint, address }],
-        }),
-      ])
+      await invalidateAccountQueries(client, connection, address)
     },
     onError: (error) => {
       // TODO: Add Toast
@@ -112,26 +133,15 @@ export function useRequestAirdrop({ address }: { address: PublicKey }) {
   return useMutation({
     mutationKey: ['airdrop', { endpoint: connection.rpcEndpoint, address }],
     mutationFn: async (amount: number = 1) => {
-      const [latestBlockhash, signature] = await Promise.all([
-        connection.getLatestBlockhash(),
-        connection.requestAirdrop(address, amount * LAMPORTS_PER_SOL),
-      ])
-
-      await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed')
+      const signature = await connection.requestAirdrop(address, amount * LAMPORTS_PER_SOL)
+      await confirmSignature(connection, signature)
       return signature
     },
     onSuccess: async (signature) => {
       // TODO: Add back Toast
       // transactionToast(signature)
       console.log('Airdrop sent', signature)
-      await Promise.all([
-        client.invalidateQueries({
-          queryKey: ['get-balance', { endpoint: connection.rpcEndpoint, address }],
-        }),
-        client.invalidateQueries({
-          queryKey: ['get-signatures', { endpoint: connection.rpcEndpoint, address }],
-        }),
-      ])
+      await invalidateAccountQueries(client, connection, address)
     },
   })
 }
@@ -148,7 +158,6 @@ async function createTransaction({
   connection: Connection
 }): Promise<{
   transaction: VersionedTransaction
-  latestBlockhash: { blockhash: string; lastValidBlockHeight: number }
 }> {
   // Get the latest blockhash to use in our transaction
   const latestBlockhash = await connection.getLatestBlockhash()
@@ -174,6 +183,5 @@ async function createTransaction({
 
   return {
     transaction,
-    latestBlockhash,
   }
 }
